@@ -25,7 +25,10 @@ FROM scratch
 # Copy the statically linked binary
 COPY --from=builder /app/main /main
 
-# Copy content files (includes both .md and .css files)
+# Include the license for the embedded Mermaid distribution
+COPY third_party/mermaid/LICENSE /licenses/mermaid/LICENSE
+
+# Copy sample content files (includes both .md and .css files)
 COPY content/ /content/
 
 # Expose port

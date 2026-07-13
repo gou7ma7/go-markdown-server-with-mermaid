@@ -1,246 +1,161 @@
-# Go Markdown Server
+# Go Markdown Server with Mermaid
 
-A low memory, <10MB Go web server that serves markdown files converted to HTML.
+A small Go web server that renders Markdown files as HTML and renders fenced
+`mermaid` code blocks as SVG diagrams in the browser.
+
+This project is forked from
+[`mountain-pass/go-markdown-server`](https://github.com/mountain-pass/go-markdown-server).
+It keeps the original `gomarkdown` parser and adds self-hosted Mermaid rendering.
 
 ## Features
 
-- 🔄 **Automatic Markdown to HTML conversion** using the `gomarkdown` library
-- 🎨 **Clean, responsive HTML template** with modern CSS styling
-- 📁 **File-based routing** - serve `.md` files from the `content/` directory
-- 🔗 **Clean URLs** - access files with or without the `.md` extension
-- 📦 **Static file serving** for CSS, images, and other assets
-- 🐳 **Ultra-minimal Docker containers** using scratch base image (no OS!)
-- 🛡️ **Auto-generated sample content** when content directory is empty
+- Markdown-to-HTML conversion with `github.com/gomarkdown/markdown`
+- Mermaid flowcharts and other Mermaid diagram types
+- Mermaid 11.16.0 bundled with the binary; no CDN or internet connection required
+- Mermaid assets loaded only on pages that contain a `mermaid` code block
+- Source-code fallback when JavaScript is disabled or a diagram is invalid
+- Clean file-based routes such as `/about` for `content/about.md`
+- Responsive light and dark styling
+- Minimal `scratch` runtime container
+- Optional HTTP security headers, enabled by default
 
-## Project Structure
+## Mermaid usage
 
+Use a normal fenced code block with the language set to `mermaid`:
+
+````markdown
+```mermaid
+flowchart LR
+    Markdown --> HTML
+    HTML --> SVG
 ```
-go-markdown-server/
-├── main.go              # Main server application
-├── go.mod              # Go module dependencies
-├── go.sum              # Dependency checksums (generated)
-├── Dockerfile          # Docker build configuration (scratch-based)
-├── LICENSE             # MIT License
-├── README.md           # This file
-├── content/            # Directory for markdown files
-│   └── index.md        # Sample homepage content
-└── static/             # Directory for static assets
-    └── style.css       # CSS styling for HTML output
+````
+
+`gomarkdown` converts the fence into a `language-mermaid` code block. The page
+then loads the embedded Mermaid library and replaces that block with an SVG.
+Other pages do not load Mermaid.
+
+Rendering happens in the browser, so a reasonably modern browser with
+JavaScript enabled is required. If rendering fails, the original diagram
+source remains visible.
+
+## Quick start with Docker
+
+```bash
+docker compose up --build -d
 ```
 
-## Prerequisites
+Open <http://localhost:8080>.
 
-- Go 1.21 or later
-- Docker (optional, for containerized deployment)
+The Compose configuration mounts `./content` at `/content`. Add Markdown files
+and an optional `style.css` to that directory.
 
-## Installation & Setup
+To stop the service:
 
-1. **Install Go dependencies:**
-   ```bash
-   go mod tidy
-   ```
+```bash
+docker compose down
+```
 
-2. **Run the server locally:**
-   ```bash
-   go run main.go
-   ```
+### Docker without Compose
 
-3. **Access the server:**
-   Open your browser to `http://localhost:8080`
+```bash
+docker build -t go-markdown-server-with-mermaid:local .
+docker run --rm -p 8080:8080 \
+  -v ./content:/content:ro \
+  go-markdown-server-with-mermaid:local
+```
+
+### Multi-platform image
+
+The multi-platform Compose file builds `linux/amd64` and `linux/arm64`.
+Override `IMAGE_NAME` with the registry tag you want to publish:
+
+```bash
+IMAGE_NAME=your-user/go-markdown-server-with-mermaid:latest \
+  docker compose -f docker-compose.multiplatform.yml build --push
+```
+
+## Run with Go
+
+Go 1.21 or later is required.
+
+```bash
+go run .
+```
 
 ## Configuration
 
-The server can be configured using environment variables:
-
-- `PORT`: Server port (default: `8080`)
-- `CONTENT_DIR`: Directory containing markdown files (default: `./content`)
-- `HTTP_SECURITY_HEADERS`: Enable/disable HTTP security headers (default: `enable`, set to `disable` to turn off)
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PORT` | `8080` | HTTP listen port |
+| `CONTENT_DIR` | `./content` | Directory containing Markdown and `style.css` |
+| `HTTP_SECURITY_HEADERS` | `enable` | Set to `disable` to turn off the default headers |
 
 Example:
+
 ```bash
-PORT=3000 CONTENT_DIR=/path/to/markdown/files HTTP_SECURITY_HEADERS=disable go run main.go
+PORT=3000 CONTENT_DIR=/path/to/content go run .
 ```
 
-## Security Features
+## Routes
 
-### HTTP Security Headers
+- `/` serves `content/index.md`
+- `/about` and `/about.md` serve `content/about.md`
+- `/docs/` serves `content/docs/index.md`
+- `/style.css` serves `content/style.css`
+- versioned `/assets/` URLs serve the Mermaid files embedded in the Go binary
 
-The server includes comprehensive HTTP security headers by default to protect against common web vulnerabilities:
+As in the upstream project, an unknown Markdown route falls back to
+`content/index.md` when that file exists.
 
-- **X-Content-Type-Options**: Prevents MIME type sniffing attacks
-- **X-XSS-Protection**: Enables XSS filtering in browsers  
-- **Referrer-Policy**: Controls referrer information sharing
-- **X-Permitted-Cross-Domain-Policies**: Blocks Flash/PDF cross-domain requests
-- **Content-Security-Policy**: Comprehensive CSP that allows iframe embedding while maintaining security
+## Security notes
 
-**Note**: Security headers can be disabled by setting `HTTP_SECURITY_HEADERS=disable` if needed for compatibility with legacy systems.
+- Mermaid uses `securityLevel: "strict"`.
+- Mermaid JavaScript and CSS are served from the same origin, which works with
+  the default `script-src 'self'` Content Security Policy.
+- No inline JavaScript or third-party CDN is used.
+- The Markdown renderer allows raw HTML and does not sanitize untrusted input.
+  Only serve trusted Markdown, or add an HTML sanitizer before exposing
+  user-supplied content.
+- Very large or deliberately complex diagrams can consume significant browser
+  CPU and memory.
 
-### Container Security
+## Project structure
 
-The Docker deployment includes advanced security hardening:
-
-- **Minimal privileges**: All Linux capabilities dropped except what's necessary
-- **Non-root execution**: Runs as user `1001:1001` inside the container
-- **No privilege escalation**: `no-new-privileges` security option enabled
-- **Path traversal protection**: Server validates all file paths to prevent directory traversal attacks
-
-### Input Validation
-
-- **Path sanitization**: All URL paths are validated and sanitized
-- **File extension restrictions**: Only serves `.md` and `.css` files from the content directory
-- **Directory containment**: Server ensures all file access stays within the designated content directory
-
-## Docker Deployment
-
-### Ultra-Minimal Container (Recommended)
-
-This Dockerfile uses a `scratch` base image, creating an extremely small container with just the Go binary and essential files - no operating system!
-
-**Benefits:**
-- **Tiny size**: ~10-15MB total (vs ~50MB+ with Alpine)
-- **Enhanced security**: No shell, package manager, or OS vulnerabilities
-- **Fast startup**: Minimal overhead
-- **Production-ready**: Statically linked binary with all dependencies included
-
-### Using Docker Compose (Recommended)
-
-**Build and run with Docker Compose:**
-```bash
-docker-compose up --build
+```text
+go-markdown-server-with-mermaid/
+├── main.go
+├── main_test.go
+├── go.mod
+├── Dockerfile
+├── docker-compose.yml
+├── content/
+│   ├── index.md
+│   └── style.css
+├── web/
+│   ├── mermaid-11.16.0.min.js
+│   ├── mermaid-init.js
+│   └── mermaid.css
+├── testdata/browser/    # Valid and invalid diagrams for browser testing
+└── third_party/mermaid/LICENSE
 ```
 
-**Build and run in background:**
+## Development and tests
+
 ```bash
-docker-compose up --build -d
+go test ./...
+go build ./...
 ```
 
-**Run development version:**
-```bash
-docker-compose --profile dev up --build
-```
+The tests verify conditional asset loading, embedded asset responses, caching,
+404 behavior, and compatibility with the default Content Security Policy.
 
-**Build the image without running:**
-```bash
-docker-compose build
-```
+When updating Mermaid, replace the versioned bundle, update
+`mermaidLibraryPath`, update the third-party license if necessary, and run both
+the Go tests and a real-browser rendering test.
 
-**Stop services:**
-```bash
-docker-compose down
-```
+## Licenses
 
-### Publishing the Image
-
-**Build and tag for publishing:**
-```bash
-docker-compose build
-docker tag mountainpass/go-markdown-server:latest mountainpass/go-markdown-server:v1.0.0
-```
-
-**Push to registry:**
-```bash
-docker push mountainpass/go-markdown-server:latest
-docker push mountainpass/go-markdown-server:v1.0.0
-```
-
-### Multi-Platform Publishing
-
-For publishing images that work on both Mac (ARM64) and Linux (AMD64) architectures, use the dedicated multiplatform compose file:
-
-**Prerequisites:**
-```bash
-# Login to Docker Hub (or your preferred registry)
-docker login
-```
-
-**Build and publish multi-platform images:**
-```bash
-# Build and push directly to registry (recommended)
-docker-compose -f docker-compose.multiplatform.yml build --push
-
-# Or build first, then push separately
-docker-compose -f docker-compose.multiplatform.yml build
-docker-compose -f docker-compose.multiplatform.yml push
-```
-
-**Supported architectures:**
-- `linux/amd64` - Standard Linux x86_64 systems
-- `linux/arm64` - Mac M1/M2 (Apple Silicon) and ARM-based Linux systems
-
-**Note:** Multi-platform builds create manifest lists that automatically serve the correct architecture when pulled. The images are stored in the registry but won't appear in your local `docker image ls` output unless specifically loaded.
-
-**Pull and run from registry:**
-```bash
-docker pull mountainpass/go-markdown-server:latest
-docker run -p 8080:8080 mountainpass/go-markdown-server:latest
-```
-
-### Manual Docker Build (Alternative)
-
-### Build the Docker image:
-```bash
-docker build -t mountainpass/go-markdown-server .
-```
-
-### Run the container:
-```bash
-docker run -p 8080:8080 mountainpass/go-markdown-server
-```
-
-### Run with custom content directory:
-```bash
-docker run -p 8080:8080 -v ./content:/content mountainpass/go-markdown-server
-```
-
-### Environment variables in Docker:
-```bash
-docker run -p 3000:3000 -e PORT=3000 -e CONTENT_DIR=/content mountainpass/go-markdown-server
-```
-
-## Usage
-
-1. **Add markdown files** to the `content/` directory
-2. **Access files** via clean URLs:
-   - `http://localhost:8080/` → serves `content/index.md`
-   - `http://localhost:8080/about` → serves `content/about.md`
-   - `http://localhost:8080/docs/setup` → serves `content/docs/setup.md`
-
-3. **Static assets** can be placed in the `static/` directory and accessed via `/static/` URL path
-
-4. **Auto-generated content**: If the content directory is empty, a sample `index.md` is automatically created
-
-## Markdown Features Supported
-
-- Headers (H1-H6)
-- Lists (ordered and unordered)
-- Code blocks with syntax highlighting
-- Links and images
-- Tables
-- Blockquotes
-- Horizontal rules
-- **Bold** and *italic* text
-- Automatic heading IDs for anchor links
-
-## Development
-
-To modify the server:
-
-1. Edit `main.go` for server logic changes
-2. Edit `static/style.css` for styling changes
-3. Add sample content to `content/` directory
-
-The server automatically extracts page titles from the first H1 header (`# Title`) in each markdown file.
-
-## Container Security & Performance
-
-The scratch-based Docker image provides:
-- **No attack surface**: No shell, package manager, or OS components
-- **Minimal size**: Only contains the statically-linked Go binary and essential files
-- **Fast deployment**: Smaller images mean faster pulls and starts
-- **Production security**: No unnecessary system packages or vulnerabilities
-
-**Note**: The scratch approach works because Go can compile to a statically-linked binary that includes all dependencies. This is ideal for microservices and containerized deployments.
-
-## License
-
-This project is open source and available under the MIT License.
+The server is distributed under the MIT License in [`LICENSE`](LICENSE).
+The embedded Mermaid distribution is also MIT-licensed; its license is kept in
+[`third_party/mermaid/LICENSE`](third_party/mermaid/LICENSE).

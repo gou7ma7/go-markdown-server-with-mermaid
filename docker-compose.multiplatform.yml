@@ -6,4 +6,4 @@ services:
       platforms:
         - linux/amd64
         - linux/arm64
-    image: mountainpass/go-markdown-server:latest
+    image: ${IMAGE_NAME:-gou7ma7/go-markdown-server-with-mermaid:latest}

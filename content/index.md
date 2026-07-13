@@ -5,9 +5,10 @@ This is a sample markdown file that demonstrates the functionality of our Go-bas
 ## Features
 
 - **Markdown to HTML conversion**: All `.md` files are automatically converted to HTML
+- **Mermaid diagrams**: Fenced `mermaid` blocks render as SVG in the browser
 - **Clean URLs**: Access files with or without the `.md` extension
 - **Template rendering**: Content is wrapped in a clean HTML template
-- **Static file serving**: CSS and other assets are served from the `/static/` path
+- **Self-hosted rendering**: Mermaid assets are embedded in the server binary
 
 ## Getting Started
 
@@ -32,6 +33,14 @@ func main() {
 - Item 1
 - Item 2
 - Item 3
+
+### Mermaid Diagram
+
+```mermaid
+flowchart LR
+    Markdown --> HTML
+    HTML --> SVG
+```
 
 ### Links
 
