@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mermaid 浏览器能力诊断</title>
+  <link rel="stylesheet" href="/__diag/assets/style-v1.css">
+  <script src="/__diag/assets/bootstrap-v1.js"></script>
+</head>
+<body>
+  <main class="page">
+    <h1>Mermaid 浏览器能力诊断</h1>
+    <p class="intro">此页面不读取 GPS、摄像头、麦克风、文件或账号。检测结果会自动保存到这台 NAS 的内存中，容器重启后清空。</p>
+
+    <section class="card current-device">
+      <h2>当前设备</h2>
+      <p id="device-role">正在读取地址中的设备角色……</p>
+      <p id="overall-status" class="overall pending">等待基础 JavaScript 启动</p>
+    </section>
+
+    <section class="card">
+      <h2>检测进度</h2>
+      <ol class="steps">
+        <li id="step-bootstrap" class="step pending"><strong>基础脚本</strong><span>等待</span></li>
+        <li id="step-syntax" class="step pending"><strong>JavaScript 内核</strong><span>等待</span></li>
+        <li id="step-network" class="step pending"><strong>NAS 资源访问</strong><span>等待</span></li>
+        <li id="step-mermaid" class="step pending"><strong>Mermaid 11 手动渲染</strong><span>等待</span></li>
+        <li id="step-production" class="step pending"><strong>生产初始化脚本</strong><span>等待</span></li>
+        <li id="step-upload" class="step pending"><strong>报告自动上传</strong><span>等待</span></li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>基础 SVG</h2>
+      <p>即使 Mermaid 失败，下面的方框和箭头也应当可见。</p>
+      <svg id="static-svg-probe" viewBox="0 0 300 90" role="img" aria-label="基础 SVG 测试">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z"></path>
+          </marker>
+        </defs>
+        <rect x="10" y="20" width="90" height="45" rx="4"></rect>
+        <text x="55" y="48" text-anchor="middle">开始</text>
+        <line x1="105" y1="43" x2="190" y2="43" marker-end="url(#arrow)"></line>
+        <rect x="195" y="20" width="90" height="45" rx="4"></rect>
+        <text x="240" y="48" text-anchor="middle">完成</text>
+      </svg>
+    </section>
+
+    <section class="card">
+      <h2>Mermaid 手动测试</h2>
+      <div id="manual-default" class="diagram-output">等待默认配置测试</div>
+      <div id="manual-conservative" class="diagram-output">等待兼容配置测试</div>
+    </section>
+
+    <section class="card">
+      <h2>与生产页面相同的测试</h2>
+      <div id="production-probe-wrapper" class="diagram-output">
+        <pre id="production-probe"><code class="language-mermaid">flowchart TD
+  A[Markdown 源码] --&gt; B[浏览器中的 SVG]</code></pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>本机报告</h2>
+      <p>如果自动上传失败，可以长按下面的内容复制。</p>
+      <textarea id="report-output" readonly>基础脚本尚未运行。</textarea>
+    </section>
+
+    <p class="footer">请保持页面打开，直到顶部显示“检测完成，报告已上传”。通常需要几秒，较慢的电子书可能需要约一分钟。</p>
+  </main>
+</body>
+</html>

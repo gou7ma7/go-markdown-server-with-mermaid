@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -45,12 +47,21 @@ func TestMermaidAssetsAreOnlyLoadedWhenNeeded(t *testing.T) {
 	body := mermaidPage.Body.String()
 	for _, expected := range []string{
 		`<code class="language-mermaid">`,
-		mermaidLibraryPath,
+		mermaidModernSyntaxProbePath,
+		mermaidLoaderPath,
 		mermaidInitPath,
 		mermaidStylePath,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Errorf("Mermaid page does not contain %q", expected)
+		}
+	}
+	for _, unexpected := range []string{
+		`src="` + mermaidLibraryPath + `"`,
+		`src="` + mermaidLegacyLibraryPath + `"`,
+	} {
+		if strings.Contains(body, unexpected) {
+			t.Errorf("Mermaid page should let the loader select a bundle, found %q", unexpected)
 		}
 	}
 	if strings.Contains(body, "cdn.") {
@@ -66,6 +77,9 @@ func TestEmbeddedMermaidAssets(t *testing.T) {
 		contains    string
 	}{
 		{mermaidLibraryPath, "text/javascript", "mermaid"},
+		{mermaidLegacyLibraryPath, "text/javascript", "mermaid"},
+		{mermaidModernSyntaxProbePath, "text/javascript", "||="},
+		{mermaidLoaderPath, "text/javascript", "mermaid-10.9.6.min.js"},
 		{mermaidInitPath, "text/javascript", `securityLevel: "strict"`},
 		{mermaidStylePath, "text/css", ".mermaid"},
 	}
@@ -91,6 +105,27 @@ func TestEmbeddedMermaidAssets(t *testing.T) {
 	missing := get(t, server.Handler(), "/assets/not-found.js")
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing asset status = %d, want 404", missing.Code)
+	}
+}
+
+func TestMermaidLoaderUsesES5CompatibleSyntax(t *testing.T) {
+	forbidden := regexp.MustCompile("(?m)\\b(?:async|await|const|let|class)\\b|=>|\\?\\.|\\?\\?|`|\\.replaceWith\\(|Array\\.from\\(")
+	if match := forbidden.Find(mermaidLoader); match != nil {
+		t.Fatalf("mermaid loader contains syntax or APIs unavailable to legacy WebViews: %q", match)
+	}
+	for _, expected := range []string{
+		"structuredClone",
+		"Object.hasOwn",
+		"String.prototype.replaceAll",
+		mermaidLibraryPath,
+		mermaidLegacyLibraryPath,
+	} {
+		if !bytes.Contains(mermaidLoader, []byte(expected)) {
+			t.Errorf("mermaid loader does not contain %q", expected)
+		}
+	}
+	if !bytes.Contains(mermaidModernSyntaxProbe, []byte("||=")) {
+		t.Fatal("modern syntax probe must test logical assignment used by Mermaid 11")
 	}
 }
 

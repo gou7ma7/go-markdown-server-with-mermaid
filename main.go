@@ -2,14 +2,22 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gomarkdown/markdown"
@@ -18,13 +26,28 @@ import (
 )
 
 const (
-	mermaidLibraryPath = "/assets/mermaid-11.16.0.min.js"
-	mermaidInitPath    = "/assets/mermaid-init-v1.js"
-	mermaidStylePath   = "/assets/mermaid-v1.css"
+	mermaidLibraryPath           = "/assets/mermaid-11.16.0.min.js"
+	mermaidLegacyLibraryPath     = "/assets/mermaid-10.9.6.min.js"
+	mermaidModernSyntaxProbePath = "/assets/mermaid-modern-syntax-probe-v1.js"
+	mermaidLoaderPath            = "/assets/mermaid-loader-v1.js"
+	mermaidInitPath              = "/assets/mermaid-init-v2.js"
+	mermaidStylePath             = "/assets/mermaid-v1.css"
+	diagnosticVersion            = "1"
+	diagnosticMaxBody            = 64 << 10
+	diagnosticMaxItems           = 50
 )
 
 //go:embed web/mermaid-11.16.0.min.js
 var mermaidLibrary []byte
+
+//go:embed web/mermaid-10.9.6.min.js
+var mermaidLegacyLibrary []byte
+
+//go:embed web/mermaid-modern-syntax-probe.js
+var mermaidModernSyntaxProbe []byte
+
+//go:embed web/mermaid-loader.js
+var mermaidLoader []byte
 
 //go:embed web/mermaid-init.js
 var mermaidInit []byte
@@ -32,10 +55,69 @@ var mermaidInit []byte
 //go:embed web/mermaid.css
 var mermaidStyle []byte
 
+//go:embed web/diagnostic.html
+var diagnosticHTML []byte
+
+//go:embed web/diagnostic.css
+var diagnosticStyle []byte
+
+//go:embed web/diagnostic-bootstrap.js
+var diagnosticBootstrap []byte
+
+//go:embed web/diagnostic-probe-es2015.js
+var diagnosticProbeES2015 []byte
+
+//go:embed web/diagnostic-probe-es2017.js
+var diagnosticProbeES2017 []byte
+
+//go:embed web/diagnostic-probe-es2018.js
+var diagnosticProbeES2018 []byte
+
+//go:embed web/diagnostic-probe-es2020.js
+var diagnosticProbeES2020 []byte
+
+//go:embed web/diagnostic-probe-module.js
+var diagnosticProbeModule []byte
+
+var diagnosticRunIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,80}$`)
+
+type diagnosticError struct {
+	Kind     string `json:"kind"`
+	Message  string `json:"message"`
+	File     string `json:"file,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Column   int    `json:"column,omitempty"`
+	Resource string `json:"resource,omitempty"`
+}
+
+type diagnosticReport struct {
+	SchemaVersion int                    `json:"schemaVersion"`
+	RunID         string                 `json:"runId"`
+	Role          string                 `json:"role"`
+	Phase         string                 `json:"phase"`
+	ClientTime    string                 `json:"clientTime,omitempty"`
+	UserAgent     string                 `json:"userAgent"`
+	Platform      string                 `json:"platform,omitempty"`
+	Vendor        string                 `json:"vendor,omitempty"`
+	Environment   map[string]interface{} `json:"environment,omitempty"`
+	Capabilities  map[string]interface{} `json:"capabilities,omitempty"`
+	Network       map[string]interface{} `json:"network,omitempty"`
+	SVG           map[string]interface{} `json:"svg,omitempty"`
+	Mermaid       map[string]interface{} `json:"mermaid,omitempty"`
+	Errors        []diagnosticError      `json:"errors,omitempty"`
+}
+
+type storedDiagnosticReport struct {
+	diagnosticReport
+	ReceivedAt time.Time `json:"receivedAt"`
+}
+
 type Server struct {
 	contentDir            string
 	port                  string
 	enableSecurityHeaders bool
+	diagnosticMu          sync.Mutex
+	diagnosticReports     []storedDiagnosticReport
 }
 
 func NewServer(contentDir, port string, enableSecurityHeaders bool) *Server {
@@ -54,12 +136,281 @@ func (s *Server) Start() error {
 // Handler returns the complete HTTP handler used by the server.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/__diag", s.diagnosticHeadersMiddleware(s.handleDiagnosticRedirect))
+	mux.HandleFunc("/__diag/meta.json", s.diagnosticHeadersMiddleware(s.handleDiagnosticMeta))
+	mux.HandleFunc("/__diag/ping", s.diagnosticHeadersMiddleware(s.handleDiagnosticPing))
+	mux.HandleFunc("/__diag/reports", s.diagnosticHeadersMiddleware(s.handleDiagnosticReports))
+	mux.HandleFunc("/__diag/assets/bootstrap-v1.js", s.diagnosticHeadersMiddleware(s.embeddedAssetHandler("text/javascript; charset=utf-8", diagnosticBootstrap)))
+	mux.HandleFunc("/__diag/assets/style-v1.css", s.diagnosticHeadersMiddleware(s.embeddedAssetHandler("text/css; charset=utf-8", diagnosticStyle)))
+	mux.HandleFunc("/__diag/assets/probe-es2015-v1.js", s.diagnosticHeadersMiddleware(s.embeddedAssetHandler("text/javascript; charset=utf-8", diagnosticProbeES2015)))
+	mux.HandleFunc("/__diag/assets/probe-es2017-v1.js", s.diagnosticHeadersMiddleware(s.embeddedAssetHandler("text/javascript; charset=utf-8", diagnosticProbeES2017)))
+	mux.HandleFunc("/__diag/assets/probe-es2018-v1.js", s.diagnosticHeadersMiddleware(s.embeddedAssetHandler("text/javascript; charset=utf-8", diagnosticProbeES2018)))
+	mux.HandleFunc("/__diag/assets/probe-es2020-v1.js", s.diagnosticHeadersMiddleware(s.embeddedAssetHandler("text/javascript; charset=utf-8", diagnosticProbeES2020)))
+	mux.HandleFunc("/__diag/assets/probe-module-v1.js", s.diagnosticHeadersMiddleware(s.embeddedAssetHandler("text/javascript; charset=utf-8", diagnosticProbeModule)))
+	mux.HandleFunc("/__diag/", s.diagnosticHeadersMiddleware(s.handleDiagnosticPage))
 	mux.HandleFunc(mermaidLibraryPath, s.securityHeadersMiddleware(s.embeddedAssetHandler("text/javascript; charset=utf-8", mermaidLibrary)))
+	mux.HandleFunc(mermaidLegacyLibraryPath, s.securityHeadersMiddleware(s.embeddedAssetHandler("text/javascript; charset=utf-8", mermaidLegacyLibrary)))
+	mux.HandleFunc(mermaidModernSyntaxProbePath, s.securityHeadersMiddleware(s.embeddedAssetHandler("text/javascript; charset=utf-8", mermaidModernSyntaxProbe)))
+	mux.HandleFunc(mermaidLoaderPath, s.securityHeadersMiddleware(s.embeddedAssetHandler("text/javascript; charset=utf-8", mermaidLoader)))
 	mux.HandleFunc(mermaidInitPath, s.securityHeadersMiddleware(s.embeddedAssetHandler("text/javascript; charset=utf-8", mermaidInit)))
 	mux.HandleFunc(mermaidStylePath, s.securityHeadersMiddleware(s.embeddedAssetHandler("text/css; charset=utf-8", mermaidStyle)))
 	mux.HandleFunc("/assets/", s.securityHeadersMiddleware(http.NotFound))
 	mux.HandleFunc("/", s.securityHeadersMiddleware(s.handleMarkdown))
 	return mux
+}
+
+func (s *Server) handleDiagnosticRedirect(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/__diag" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	target := "/__diag/"
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+}
+
+func (s *Server) handleDiagnosticPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/__diag/" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method == http.MethodGet {
+		role := normalizeDiagnosticRole(r.URL.Query().Get("role"))
+		log.Printf("DIAG_VISIT role=%s user_agent=%q", role, truncateString(r.UserAgent(), 2048))
+	}
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write(diagnosticHTML)
+}
+
+func (s *Server) handleDiagnosticMeta(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sum := sha256.Sum256(mermaidLibrary)
+	if r.Method == http.MethodHead {
+		writeDiagnosticJSONHead(w, http.StatusOK)
+		return
+	}
+	writeDiagnosticJSON(w, http.StatusOK, map[string]interface{}{
+		"diagnosticVersion":     diagnosticVersion,
+		"mermaidVersion":        "11.16.0",
+		"mermaidPath":           mermaidLibraryPath,
+		"mermaidBytes":          len(mermaidLibrary),
+		"mermaidSHA256":         fmt.Sprintf("%x", sum),
+		"legacyMermaidVersion":  "10.9.6",
+		"legacyMermaidPath":     mermaidLegacyLibraryPath,
+		"legacyMermaidBytes":    len(mermaidLegacyLibrary),
+		"modernSyntaxProbePath": mermaidModernSyntaxProbePath,
+		"loaderPath":            mermaidLoaderPath,
+		"initPath":              mermaidInitPath,
+		"securityHeaders":       s.enableSecurityHeaders,
+	})
+}
+
+func (s *Server) handleDiagnosticPing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.Method == http.MethodHead {
+		writeDiagnosticJSONHead(w, http.StatusOK)
+		return
+	}
+	writeDiagnosticJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":                true,
+		"diagnosticVersion": diagnosticVersion,
+		"serverTime":        time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (s *Server) handleDiagnosticReports(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		s.handleDiagnosticReportList(w, r)
+	case http.MethodPost:
+		s.handleDiagnosticReportPost(w, r)
+	default:
+		w.Header().Set("Allow", "GET, HEAD, POST")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleDiagnosticReportList(w http.ResponseWriter, r *http.Request) {
+	roleFilter := r.URL.Query().Get("role")
+	if roleFilter != "" && normalizeDiagnosticRole(roleFilter) != roleFilter {
+		http.Error(w, "Invalid role", http.StatusBadRequest)
+		return
+	}
+	limit := diagnosticMaxItems
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed < 1 || parsed > diagnosticMaxItems {
+			http.Error(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+
+	s.diagnosticMu.Lock()
+	reports := make([]storedDiagnosticReport, 0, len(s.diagnosticReports))
+	for i := len(s.diagnosticReports) - 1; i >= 0 && len(reports) < limit; i-- {
+		report := s.diagnosticReports[i]
+		if roleFilter == "" || report.Role == roleFilter {
+			reports = append(reports, report)
+		}
+	}
+	s.diagnosticMu.Unlock()
+
+	if r.Method == http.MethodHead {
+		writeDiagnosticJSONHead(w, http.StatusOK)
+		return
+	}
+	writeDiagnosticJSON(w, http.StatusOK, map[string]interface{}{
+		"diagnosticVersion": diagnosticVersion,
+		"count":             len(reports),
+		"reports":           reports,
+	})
+}
+
+func (s *Server) handleDiagnosticReportPost(w http.ResponseWriter, r *http.Request) {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, diagnosticMaxBody)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var report diagnosticReport
+	if err := decoder.Decode(&report); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			http.Error(w, "Report is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "Invalid diagnostic report", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		http.Error(w, "Invalid diagnostic report", http.StatusBadRequest)
+		return
+	}
+	if err := validateDiagnosticReport(&report); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	stored := storedDiagnosticReport{
+		diagnosticReport: report,
+		ReceivedAt:       time.Now().UTC(),
+	}
+	s.storeDiagnosticReport(stored)
+	encoded, _ := json.Marshal(stored)
+	log.Printf("DIAG_REPORT %s", encoded)
+	writeDiagnosticJSON(w, http.StatusAccepted, map[string]interface{}{
+		"stored":     true,
+		"runId":      stored.RunID,
+		"receivedAt": stored.ReceivedAt,
+	})
+}
+
+func (s *Server) storeDiagnosticReport(report storedDiagnosticReport) {
+	s.diagnosticMu.Lock()
+	defer s.diagnosticMu.Unlock()
+	for i := range s.diagnosticReports {
+		if s.diagnosticReports[i].RunID == report.RunID {
+			copy(s.diagnosticReports[i:], s.diagnosticReports[i+1:])
+			s.diagnosticReports[len(s.diagnosticReports)-1] = report
+			return
+		}
+	}
+	if len(s.diagnosticReports) == diagnosticMaxItems {
+		copy(s.diagnosticReports, s.diagnosticReports[1:])
+		s.diagnosticReports[len(s.diagnosticReports)-1] = report
+		return
+	}
+	s.diagnosticReports = append(s.diagnosticReports, report)
+}
+
+func validateDiagnosticReport(report *diagnosticReport) error {
+	if report.SchemaVersion != 1 {
+		return fmt.Errorf("unsupported schemaVersion")
+	}
+	if !diagnosticRunIDPattern.MatchString(report.RunID) {
+		return fmt.Errorf("invalid runId")
+	}
+	if normalizeDiagnosticRole(report.Role) != report.Role {
+		return fmt.Errorf("invalid role")
+	}
+	if !diagnosticRunIDPattern.MatchString(report.Phase) {
+		return fmt.Errorf("invalid phase")
+	}
+	if len(report.UserAgent) > 2048 || len(report.Platform) > 256 || len(report.Vendor) > 256 || len(report.ClientTime) > 64 {
+		return fmt.Errorf("diagnostic string is too long")
+	}
+	for _, values := range []map[string]interface{}{report.Environment, report.Capabilities, report.Network, report.SVG, report.Mermaid} {
+		if len(values) > 100 {
+			return fmt.Errorf("too many diagnostic fields")
+		}
+	}
+	if len(report.Errors) > 20 {
+		return fmt.Errorf("too many errors")
+	}
+	for _, diagnosticError := range report.Errors {
+		if len(diagnosticError.Kind) > 64 || len(diagnosticError.Message) > 1000 || len(diagnosticError.File) > 256 || len(diagnosticError.Resource) > 256 {
+			return fmt.Errorf("diagnostic error is too long")
+		}
+	}
+	return nil
+}
+
+func normalizeDiagnosticRole(role string) string {
+	switch role {
+	case "reader_builtin", "reader_via", "phone_via", "desktop":
+		return role
+	default:
+		return "unknown"
+	}
+}
+
+func truncateString(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit]
+}
+
+func writeDiagnosticJSON(w http.ResponseWriter, status int, value interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeDiagnosticJSONHead(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
 }
 
 func (s *Server) embeddedAssetHandler(contentType string, content []byte) http.HandlerFunc {
@@ -101,6 +452,19 @@ func (s *Server) securityHeadersMiddleware(next http.HandlerFunc) http.HandlerFu
 		// Call the next handler
 		next(w, r)
 	}
+}
+
+// diagnosticHeadersMiddleware keeps the probe self-contained and explicitly
+// denies device sensors that are irrelevant to Mermaid rendering.
+func (s *Server) diagnosticHeadersMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return s.securityHeadersMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "geolocation=(), camera=(), microphone=(), accelerometer=(), gyroscope=(), magnetometer=()")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+		next(w, r)
+	})
 }
 
 func (s *Server) handleMarkdown(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +557,8 @@ func (s *Server) handleMarkdown(w http.ResponseWriter, r *http.Request) {
     <title>{{.Title}}</title>
     <link rel="stylesheet" href="/style.css">
     {{if .HasMermaid}}<link rel="stylesheet" href="` + mermaidStylePath + `">
-    <script defer src="` + mermaidLibraryPath + `"></script>
+    <script defer src="` + mermaidModernSyntaxProbePath + `"></script>
+    <script defer src="` + mermaidLoaderPath + `"></script>
     <script defer src="` + mermaidInitPath + `"></script>{{end}}
 </head>
 <body>

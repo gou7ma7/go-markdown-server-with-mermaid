@@ -7,7 +7,21 @@
     console.warn("Mermaid rendering failed; showing source:", error);
   }
 
+  function showAllSources(error) {
+    var blocks = document.querySelectorAll("pre > code.language-mermaid");
+    for (var i = 0; i < blocks.length; i += 1) {
+      showSource(blocks[i].parentElement, error);
+    }
+  }
+
+  var renderingStarted = false;
+
   async function renderMermaidBlocks() {
+    if (renderingStarted) {
+      return;
+    }
+    renderingStarted = true;
+
     var blocks = Array.from(
       document.querySelectorAll("pre > code.language-mermaid")
     );
@@ -17,9 +31,7 @@
     }
 
     if (typeof window.mermaid === "undefined") {
-      blocks.forEach(function (code) {
-        showSource(code.parentElement, new Error("Mermaid failed to load"));
-      });
+      showAllSources(new Error("Mermaid failed to load"));
       return;
     }
 
@@ -62,11 +74,33 @@
     }
   }
 
+  function startWhenLibraryIsReady() {
+    if (window.__mermaidLibraryState === "ready") {
+      renderMermaidBlocks();
+      return;
+    }
+    if (window.__mermaidLibraryState === "failed") {
+      showAllSources(new Error("Mermaid failed to load"));
+      return;
+    }
+
+    document.addEventListener("mermaid-library-ready", renderMermaidBlocks, {
+      once: true
+    });
+    document.addEventListener(
+      "mermaid-library-failed",
+      function () {
+        showAllSources(new Error("Mermaid failed to load"));
+      },
+      { once: true }
+    );
+  }
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", renderMermaidBlocks, {
+    document.addEventListener("DOMContentLoaded", startWhenLibraryIsReady, {
       once: true
     });
   } else {
-    renderMermaidBlocks();
+    startWhenLibraryIsReady();
   }
 })();
